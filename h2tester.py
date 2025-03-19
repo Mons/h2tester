@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import asyncio
 import ssl
 import random
@@ -12,6 +14,8 @@ import logging
 import colorlog
 import h2.settings
 from urllib.parse import urlparse
+import sys
+import getopt
 
 import os
 from logging.handlers import RotatingFileHandler
@@ -29,26 +33,22 @@ def add_file_logging(log, log_file=None, max_size_mb=10, backup_count=3):
         logging.Logger: The configured logger instance.
     """
     if log_file:
-        # Create directory for log file if it doesn't exist
         log_dir = os.path.dirname(log_file)
         if log_dir and not os.path.exists(log_dir):
             os.makedirs(log_dir)
             
-        # Create a file handler for logging to a file
         file_handler = RotatingFileHandler(
             log_file,
             maxBytes=max_size_mb * 1024 * 1024,
             backupCount=backup_count
         )
         
-        # Use a simpler formatter for file logs
         file_formatter = logging.Formatter(
             '%(asctime)s.%(msecs)03d [%(levelname)s] %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S'
         )
         file_handler.setFormatter(file_formatter)
         
-        # Add the file handler to the root logger
         log.addHandler(file_handler)
         
         log.info(f"File logging enabled: {log_file}")
@@ -62,6 +62,7 @@ level_map = {
     'ERROR': 'E',
     'CRITICAL': 'C'
 }
+
 class SingleCharLevelNameFormatter(colorlog.ColoredFormatter):
     def format(self, record):
         record.lname = level_map.get(record.levelname, record.levelname)
@@ -82,13 +83,10 @@ handler.setFormatter(SingleCharLevelNameFormatter(
 logging.basicConfig(
     level=logging.INFO, handlers=[handler]
 )
-
 log = logging.getLogger('h2tester')
-add_file_logging(log, "h2tester.log")
 
 class HTTP2Connection:
     def __init__(self, uri, method="GET", body=None, headers=None, ping_interval=1, request_interval=7):
-        # Parse the URI
         parsed_uri = urlparse(uri)
         self.req = {
             'uri': uri,
@@ -102,7 +100,6 @@ class HTTP2Connection:
             'headers': headers or {}
         }
         
-        # If there's a query string, append it to the path
         if self.req['query']:
             self.req['path'] = f"{self.req['path']}?{self.req['query']}"
             
@@ -130,10 +127,9 @@ class HTTP2Connection:
                 self.current = asyncio.Event()
 
                 start_time = time.time()
-                log.info(f"Connectingto {self.host}:{self.port} via HTTP/2 (gen {self.gen})")
+                log.info(f"Connecting to {self.host}:{self.port} via HTTP/2 (gen {self.gen})")
                 self.reader, self.writer = await asyncio.open_connection(self.host, self.port, ssl=ssl_context)
-                # log.info(f"Connected to {self.host}:{self.port} via HTTP/2 (gen {self.gen})")
-                log.info(f"Connected to {self.host}:{self.port} in {time.time() - start_time:.3f}s")
+                log.info(f"Connected  to {self.host}:{self.port} in {time.time() - start_time:.3f}s")
 
                 self.conn = h2.connection.H2Connection(config=h2.config.H2Configuration(client_side=True))
                 self.conn.initiate_connection()
@@ -169,15 +165,15 @@ class HTTP2Connection:
                                 log.info(f"Remote settings changed: {chg}")
                             elif isinstance(event, h2.events.SettingsAcknowledged):
                                 pass
+                            elif isinstance(event, h2.events.WindowUpdated):
+                                pass
                             elif isinstance(event, h2.events.ConnectionTerminated):
-                                # print(f"[!] Connection terminated by server: {event}")
                                 raise Exception(f"Connection terminated by server: {event.error_code}")
                             else:
                                 log.warning(f"Unhandled event: {event}")
                         
                         data = self.conn.data_to_send()
                         if data:
-                            # print(f"Draining data {data}")
                             self.writer.write(data)
                             await self.writer.drain()
                 except Exception as e:
@@ -195,7 +191,6 @@ class HTTP2Connection:
                 await self.close()
                 break
             except Exception as e:
-                # log.error(f"[!] {e} at {e.__traceback__.tb_frame.f_code.co_filename} line {e.__traceback__.tb_lineno}")
                 log.error(f"[!] {e} at line {e.__traceback__.tb_lineno}")
                 await asyncio.sleep(1)
 
@@ -210,7 +205,6 @@ class HTTP2Connection:
                 self.conn.ping(ping_data)
                 self.writer.write(self.conn.data_to_send())
                 await self.writer.drain()
-                # print(f"[?] Sent PING {ping_data}")
                 pong_data = await self.pong.get()
                 self.pong.task_done()
                 if ping_data == pong_data:
@@ -239,7 +233,6 @@ class HTTP2Connection:
                     (":authority", self.host),
                     (":scheme", self.req['scheme']),
                     (":path", self.req['path']),
-                    # ("user-agent", "async-http2-tester"),
                 ]
                 
                 for name, value in self.req['headers'].items():
@@ -252,7 +245,6 @@ class HTTP2Connection:
                 
                 self.request_active = True
                 self.writer.write(self.conn.data_to_send())
-                log.info(f"Sent request")
                 await self.writer.drain()
                 
                 headers = {}
@@ -260,7 +252,6 @@ class HTTP2Connection:
 
                 while True:
                     event = await self.stream[stream_id].get()
-                    # print(f"[>] {event} from {event.stream_id}")
                     if isinstance(event, h2.events.StreamEnded):
                         del self.stream[stream_id]
                         break
@@ -297,11 +288,9 @@ class HTTP2Connection:
     
     @staticmethod
     def generate_ping_data():
-        """Generate random 8-byte ping payload."""
         return bytes(random.choices(string.ascii_letters.encode(), k=8))
 
     async def close(self):
-        """Close the connection gracefully."""
         if self.writer:
             self.conn.close_connection()
             self.writer.write(self.conn.data_to_send())
@@ -310,31 +299,133 @@ class HTTP2Connection:
             await self.writer.wait_closed()
             print("[+] Connection closed.")
 
+usage = """
+HTTP/2 Tester - Test HTTP/2 connections and requests
+
+Usage: python h2tester.py [options] [url]
+
+Options:
+  -h, --help              Show this help message and exit
+  -u, --url=URL           Target URL (default: https://nghttp2.org/httpbin/get)
+  -m, --method=METHOD     HTTP method (default: GET)
+  -d, --data=DATA         Request body data
+  -H, --header=HEADER     Request header in format "Name: Value" (can be used multiple times)
+  -i, --interval=SECONDS  Request interval in seconds (default: 7)
+  -p, --ping=SECONDS      Ping interval in seconds (default: 1)
+  -l, --log=FILE          Log to specified file
+  -L, --log-auto          Enable automatic logging (generates filename based on uri)
+  -v, --verbose           Increase verbosity (debug mode)
+  -q, --quiet             Suppress console output (quiet mode)
+"""
+
+
 async def main():
-    # Examples of how to use the new URI-based constructor
-    # host = "example.com"
-    # host = "127.0.0.1"
-    # host = "nghttp2.org"
+    # Default values
+    uri = "https://nghttp2.org/httpbin/get"
+    method = "GET"
+    body = None
+    headers = {}
+    log_file = None
+    smart_log = False
+    ping_interval = 1
+    request_interval = 7
+    log_level = logging.INFO
     
-    # Simple GET request
-    # https://ntapi-ha-gateway.test.env/ping
-    # tester = HTTP2Connection("https://nghttp2.org/httpbin/get")
-    # tester = HTTP2Connection("https://gitlab.test.env")
-    # tester = HTTP2Connection("https://git-02.test.env")
+    # Command line arguments
     
-    # tester = HTTP2Connection("https://gitlab-02.test.env")
-    tester = HTTP2Connection("https://gitlab-dr.test.env")
+    try:
+        opts, args = getopt.getopt(sys.argv[1:], "hu:m:d:H:i:p:l:Lvq", 
+                                   ["help", "url=", "method=", "data=", "header=", 
+                                    "interval=", "ping=", "log=", "log-auto", "verbose", "quiet"])
+    except getopt.GetoptError as err:
+        print(str(err))
+        print(usage)
+        sys.exit(2)
     
-    # tester = HTTP2Connection("https://ld-git-db.test.env")
+    for opt, arg in opts:
+        if opt in ("-h", "--help"):
+            print(usage)
+            sys.exit()
+        elif opt in ("-u", "--url"):
+            uri = arg
+        elif opt in ("-m", "--method"):
+            method = arg.upper()
+        elif opt in ("-d", "--data"):
+            body = arg.encode()
+        elif opt in ("-H", "--header"):
+            if ":" in arg:
+                name, value = arg.split(":", 1)
+                headers[name.strip()] = value.strip()
+            else:
+                print(f"Invalid header format: {arg}. Should be 'Name: Value'")
+        elif opt in ("-i", "--interval"):
+            try:
+                request_interval = float(arg)
+            except ValueError:
+                print(f"Invalid interval value: {arg}. Using default: {request_interval}")
+        elif opt in ("-p", "--ping"):
+            try:
+                ping_interval = float(arg)
+            except ValueError:
+                print(f"Invalid ping interval value: {arg}. Using default: {ping_interval}")
+        elif opt in ("-l", "--log"):
+            log_file = arg
+            smart_log = False  # Explicit log file overrides smart logging
+        elif opt in ("-L", "--log-auto"):
+            smart_log = True
+            log_file = None  # Will be set later
+        elif opt in ("-v", "--verbose"):
+            log_level = logging.DEBUG
+            log.setLevel(logging.DEBUG)
+        elif opt in ("-q", "--quiet"):
+            # Remove console handler
+            for handler in log.handlers[:]:
+                if isinstance(handler, logging.StreamHandler):
+                    log.removeHandler(handler)
     
-    # POST request with body and headers
-    # tester = HTTP2Connection(
-    #     "https://example.com/api/data",
-    #     method="POST",
-    #     body=b'{"key": "value"}',
-    #     headers={"Content-Type": "application/json"}
-    # )
-    log.info("Starting for %s", tester.req['uri'])
+    # Use the first non-option argument as URL if provided
+    if args:
+        uri = args[0]
+    
+    # Create a temporary tester instance to parse the URL
+    temp_tester = HTTP2Connection(uri=uri, method=method)
+    
+    # Generate smart log filename if smart logging is enabled
+    if smart_log:
+        # Format the current time
+        timestamp = time.strftime("%Y%m%dT%H%M%S")
+        
+        # Sanitize path for filename (replace / with -)
+        safe_path = temp_tester.req['path'].replace('/', '-')
+        if safe_path.startswith('-'):
+            safe_path = safe_path[1:]
+        if not safe_path:
+            safe_path = "root"
+            
+        # Keep path to reasonable length
+        if len(safe_path) > 30:
+            safe_path = safe_path[:30]
+            
+        # Generate filename: h2t-<method>-<host>-<path>-<datetime>.log
+        log_file = f"h2t-{method.lower()}-{temp_tester.host}-{safe_path}-{timestamp}.log"
+    
+    # Configure file logging if a log file was specified or generated
+    if log_file:
+        add_file_logging(log, log_file)
+    
+    # Create the actual tester with all parameters
+    tester = HTTP2Connection(
+        uri=uri,
+        method=method,
+        body=body,
+        headers=headers,
+        ping_interval=ping_interval,
+        request_interval=request_interval
+    )
+    
+    log.info(f"Starting HTTP/2 tester for {tester.req['uri']}")
+    log.info(f"Method: {method}, Ping interval: {ping_interval}s, Request interval: {request_interval}s")
+    
     await tester.connect()
 
 if __name__ == "__main__":
