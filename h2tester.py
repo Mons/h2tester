@@ -199,7 +199,12 @@ class HTTP2Connection:
                         asyncio.open_connection(self.host, self.port, ssl=ssl_context),
                         timeout=self.connect_timeout
                     )
-                    log.info(f"Connected to {self.host}:{self.port} in {since(start_time)}")
+                    peername = self.writer.get_extra_info('peername')
+                    remote_ip = None
+                    if peername:
+                        remote_ip, _ = peername
+                        
+                    log.info(f"Connected to {self.host}:{self.port} ({remote_ip}) in {since(start_time)}")
                 except asyncio.TimeoutError:
                     log.error(f"Connection timeout after {since(start_time)}")
                     continue
