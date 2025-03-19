@@ -16,22 +16,74 @@ import h2.settings
 from urllib.parse import urlparse
 import sys
 import getopt
+import re
 
 import os
 from logging.handlers import RotatingFileHandler
 
-def add_file_logging(log, log_file=None, max_size_mb=10, backup_count=3):
+# Global time formatting configuration
+# TIME_FORMAT = ".3s"  # Default format: 3 decimal places, seconds
+TIME_PRECISION = 3
+TIME_UNIT = 's'
+TIME_UNIT_MULTIPLIER = 1
+TIME_FORMATS = {
+    's': '.3s',
+    'm': '.0m',
+    'u': '.0u',
+}
+
+def parse_time_format(format_str):
     """
-    Set up optional file logging.
+    Parse time format string like '.3s' or '.0m'
+    Returns precision (int) and unit (str)
+    """
+    if format_str in TIME_FORMATS:
+        format_str =  TIME_FORMATS[format_str]
+    match = re.match(r'0?\.(\d+)([a-zµ]+)', format_str)
+    if not match:
+        log.warning(f"Invalid time format: {format_str}, using default (.3s)")
+        return 3, 's', 1
+    
+    precision = int(match.group(1))
+    unit = match.group(2)
+    unit_multiplier = 1
+    # Normalize unit
+    if unit in ['m', 'ms']:
+        unit = 'ms'
+        unit_multiplier = 1000
+    elif unit in ['u', 'µ', 'us', 'µs']:
+        unit = 'µs'
+        unit_multiplier = 1000000
+    elif unit == 's':
+        unit = 's'
+    else:
+        log.warning(f"Unknown time unit: {unit}, using seconds")
+        unit = 's'
+    
+    return precision, unit, unit_multiplier
+
+def time_format(interval, format_str=None):
+    """
+    Format time interval according to the specified format
     
     Args:
-        log_file (str, optional): Path to the log file. If None, file logging is disabled.
-        max_size_mb (int): Maximum size of log file in MB before rotation.
-        backup_count (int): Number of backup files to keep.
+        interval (float): Time interval in seconds
+        format_str (str, optional): Format like '.3s', '.0m'. Defaults to global TIME_FORMAT.
     
     Returns:
-        logging.Logger: The configured logger instance.
+        str: Formatted time string with appropriate unit
     """
+    # Format with specified precision
+    if TIME_PRECISION == 0:
+        return f"{int(interval * TIME_UNIT_MULTIPLIER)}{TIME_UNIT}"
+    else:
+        format_spec = f"{{:.{TIME_PRECISION}f}}{TIME_UNIT}"
+        return format_spec.format(interval * TIME_UNIT_MULTIPLIER)
+
+def since(start_time, format_str=None):
+    return time_format(time.time() - start_time, format_str)
+
+def add_file_logging(log, log_file=None, max_size_mb=10, backup_count=3):
     if log_file:
         log_dir = os.path.dirname(log_file)
         if log_dir and not os.path.exists(log_dir):
@@ -129,7 +181,7 @@ class HTTP2Connection:
                 start_time = time.time()
                 log.info(f"Connecting to {self.host}:{self.port} via HTTP/2 (gen {self.gen})")
                 self.reader, self.writer = await asyncio.open_connection(self.host, self.port, ssl=ssl_context)
-                log.info(f"Connected  to {self.host}:{self.port} in {time.time() - start_time:.3f}s")
+                log.info(f"Connected  to {self.host}:{self.port} in {since(start_time)}")
 
                 self.conn = h2.connection.H2Connection(config=h2.config.H2Configuration(client_side=True))
                 self.conn.initiate_connection()
@@ -208,9 +260,9 @@ class HTTP2Connection:
                 pong_data = await self.pong.get()
                 self.pong.task_done()
                 if ping_data == pong_data:
-                    log.info(f"PONG received in {time.time() - start_time:.3f}s")
+                    log.info(f"PONG received in {since(start_time)}")
                 else:
-                    log.error(f"PONG received {ping_data} ≠ {pong_data} in {time.time() - start_time:.3f}s")
+                    log.error(f"PONG received {ping_data} ≠ {pong_data} in {since(start_time)}")
                 await asyncio.wait_for(self.current.wait(), timeout=self.ping_interval - (time.time() - start_time))
             except asyncio.TimeoutError:
                 pass
@@ -270,11 +322,11 @@ class HTTP2Connection:
                 status = int(headers[':status'])
 
                 if status < 400:
-                    log.info(f"{self.req['method']} {self.req['path']} → {status} +{len(data)} in {time.time() - start_time:.3f}s")
+                    log.info(f"{self.req['method']} {self.req['path']} → {status} +{len(data)} in {since(start_time)}")
                 elif status < 500:
-                    log.warning(f"{self.req['method']} {self.req['path']} → {status} +{len(data)} in {time.time() - start_time:.3f}s")
+                    log.warning(f"{self.req['method']} {self.req['path']} → {status} +{len(data)} in {since(start_time)}")
                 else:
-                    log.error(f"{self.req['method']} {self.req['path']} → {status} +{len(data)} in {time.time() - start_time:.3f}s")
+                    log.error(f"{self.req['method']} {self.req['path']} → {status} +{len(data)} in {since(start_time)}")
                 
                 await asyncio.wait_for(self.current.wait(), timeout=self.request_interval - (time.time() - start_time))
             except asyncio.TimeoutError:
@@ -299,21 +351,27 @@ class HTTP2Connection:
             await self.writer.wait_closed()
             print("[+] Connection closed.")
 
-usage = """
+DEFAULT_PING_INTERVAL = 1.0
+DEFAULT_REQUEST_INTERVAL = 3.0
+DEFAULT_URL = "https://nghttp2.org/httpbin/get"
+DEFAULT_METHOD = "GET"
+
+usage = f"""
 HTTP/2 Tester - Test HTTP/2 connections and requests
 
 Usage: python h2tester.py [options] [url]
 
 Options:
   -h, --help              Show this help message and exit
-  -u, --url=URL           Target URL (default: https://nghttp2.org/httpbin/get)
-  -m, --method=METHOD     HTTP method (default: GET)
+  -u, --url=URL           Target URL (default: {DEFAULT_URL})
+  -m, --method=METHOD     HTTP method (default: {DEFAULT_METHOD})
   -d, --data=DATA         Request body data
   -H, --header=HEADER     Request header in format "Name: Value" (can be used multiple times)
-  -i, --interval=SECONDS  Request interval in seconds (default: 7)
-  -p, --ping=SECONDS      Ping interval in seconds (default: 1)
+  -i, --interval=SECONDS  Request interval in seconds (default: {DEFAULT_REQUEST_INTERVAL})
+  -p, --ping=SECONDS      Ping interval in seconds (default: {DEFAULT_PING_INTERVAL})
   -l, --log=FILE          Log to specified file
   -L, --log-auto          Enable automatic logging (generates filename based on uri)
+  -T, --time-format=FMT   Time format (.3s, .1m, .0µs, .0u - precision and unit. Presets: s, m, u)
   -v, --verbose           Increase verbosity (debug mode)
   -q, --quiet             Suppress console output (quiet mode)
 """
@@ -329,14 +387,15 @@ async def main():
     smart_log = False
     ping_interval = 1
     request_interval = 7
-    log_level = logging.INFO
+    global TIME_PRECISION, TIME_UNIT, TIME_UNIT_MULTIPLIER
     
     # Command line arguments
     
     try:
-        opts, args = getopt.getopt(sys.argv[1:], "hu:m:d:H:i:p:l:Lvq", 
+        opts, args = getopt.getopt(sys.argv[1:], "hu:m:d:H:i:p:l:LT:vq", 
                                    ["help", "url=", "method=", "data=", "header=", 
-                                    "interval=", "ping=", "log=", "log-auto", "verbose", "quiet"])
+                                    "interval=", "ping=", "log=", "log-auto", 
+                                    "time-format=", "verbose", "quiet"])
     except getopt.GetoptError as err:
         print(str(err))
         print(usage)
@@ -370,12 +429,11 @@ async def main():
                 print(f"Invalid ping interval value: {arg}. Using default: {ping_interval}")
         elif opt in ("-l", "--log"):
             log_file = arg
-            smart_log = False  # Explicit log file overrides smart logging
         elif opt in ("-L", "--log-auto"):
             smart_log = True
-            log_file = None  # Will be set later
+        elif opt in ("-T", "--time-format"):
+            TIME_PRECISION, TIME_UNIT, TIME_UNIT_MULTIPLIER = parse_time_format(arg)
         elif opt in ("-v", "--verbose"):
-            log_level = logging.DEBUG
             log.setLevel(logging.DEBUG)
         elif opt in ("-q", "--quiet"):
             # Remove console handler
@@ -383,37 +441,31 @@ async def main():
                 if isinstance(handler, logging.StreamHandler):
                     log.removeHandler(handler)
     
-    # Use the first non-option argument as URL if provided
     if args:
         uri = args[0]
     
-    # Create a temporary tester instance to parse the URL
-    temp_tester = HTTP2Connection(uri=uri, method=method)
-    
     # Generate smart log filename if smart logging is enabled
     if smart_log:
-        # Format the current time
-        timestamp = time.strftime("%Y%m%dT%H%M%S")
-        
-        # Sanitize path for filename (replace / with -)
-        safe_path = temp_tester.req['path'].replace('/', '-')
+        if log_file:
+            raise ValueError("Cannot specify both --log and --log-auto")
+
+        parsed_uri = urlparse(uri)
+        host = parsed_uri.netloc.split(':')[0]
+        path = parsed_uri.path or '/'
+
+        safe_path = path.replace('/', '-')
         if safe_path.startswith('-'):
             safe_path = safe_path[1:]
-        if not safe_path:
-            safe_path = "root"
-            
-        # Keep path to reasonable length
         if len(safe_path) > 30:
             safe_path = safe_path[:30]
-            
-        # Generate filename: h2t-<method>-<host>-<path>-<datetime>.log
-        log_file = f"h2t-{method.lower()}-{temp_tester.host}-{safe_path}-{timestamp}.log"
+
+        timestamp = time.strftime("%Y%m%dT%H%M%S")
+
+        log_file = f"h2t-{method.lower()}-{host}-{safe_path}-{timestamp}.log"
     
-    # Configure file logging if a log file was specified or generated
     if log_file:
         add_file_logging(log, log_file)
     
-    # Create the actual tester with all parameters
     tester = HTTP2Connection(
         uri=uri,
         method=method,
@@ -423,8 +475,8 @@ async def main():
         request_interval=request_interval
     )
     
-    log.info(f"Starting HTTP/2 tester for {tester.req['uri']}")
-    log.info(f"Method: {method}, Ping interval: {ping_interval}s, Request interval: {request_interval}s")
+    log.info(f"Starting HTTP/2 tester for {method} {tester.req['uri']}")
+    log.info(f"Ping interval: {time_format(ping_interval) }, Request interval: {time_format(request_interval)}")
     
     await tester.connect()
 
