@@ -17,9 +17,22 @@ from urllib.parse import urlparse
 import sys
 import getopt
 import re
-
+from contextlib import asynccontextmanager
 import os
 from logging.handlers import RotatingFileHandler
+
+@asynccontextmanager
+async def asynciotimeout(seconds):
+    task = asyncio.current_task()
+    loop = asyncio.get_event_loop()
+    handle = loop.call_later(seconds, task.cancel)
+
+    try:
+        yield
+    except asyncio.CancelledError:
+        raise asyncio.TimeoutError()
+    finally:
+        handle.cancel()
 
 # Global time formatting configuration
 # TIME_FORMAT = ".3s"  # Default format: 3 decimal places, seconds
@@ -393,7 +406,7 @@ class HTTP2Connection:
                 request_complete = False
                 
                 try:
-                    async with asyncio.timeout(self.response_timeout):
+                    async with asynciotimeout(self.response_timeout):
                         while True:
                             event = await self.stream[stream_id].get()
                             if isinstance(event, h2.events.StreamEnded):
